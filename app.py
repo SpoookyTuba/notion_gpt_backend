@@ -18,12 +18,44 @@ NOTION_HEADERS = {
 
 # ---------- Helpers ----------
 
+def _to_number(value):
+    try:
+        f = float(str(value).strip())
+        return int(f) if f.is_integer() else f
+    except Exception:
+        return None
+
+def _to_multi_select_list(value):
+    """
+    Accepts:
+      - string like "tag1; tag2, tag3"
+      - list/tuple of strings
+    Returns list of {"name": tag}
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        names = [str(v).strip() for v in value if str(v).strip()]
+    else:
+        text = str(value)
+        parts = []
+        for chunk in text.split(";"):
+            parts.extend(chunk.split(","))
+        names = [p.strip() for p in parts if p.strip()]
+    return [{"name": n} for n in names]
+
 def map_properties_for_create(flat_props: dict) -> dict:
     """
     Convert flat string dict to Notion property objects for page creation.
-    - Name   -> title
-    - Status -> status
-    - everything else -> rich_text
+    Special handling:
+      - Name     -> title
+      - Status   -> status
+      - Section  -> select
+      - Tags     -> multi_select
+      - Order    -> number
+      - Source   -> select
+      - Content  -> rich_text
+      - others   -> rich_text
     """
     mapped = {}
     for key, value in (flat_props or {}).items():
@@ -31,14 +63,25 @@ def map_properties_for_create(flat_props: dict) -> dict:
             mapped[key] = {"title": [{"text": {"content": str(value)}}]}
         elif key == "Status":
             mapped[key] = {"status": {"name": str(value)}}
+        elif key == "Section":
+            mapped[key] = {"select": {"name": str(value)}}
+        elif key == "Tags":
+            mapped[key] = {"multi_select": _to_multi_select_list(value)}
+        elif key == "Order":
+            num = _to_number(value)
+            if num is not None:
+                mapped[key] = {"number": num}
+        elif key == "Source":
+            mapped[key] = {"select": {"name": str(value)}}
+        elif key == "Content":
+            mapped[key] = {"rich_text": [{"text": {"content": str(value)}}]}
         else:
             mapped[key] = {"rich_text": [{"text": {"content": str(value)}}]}
     return mapped
 
 def map_properties_for_update(flat_props: dict) -> dict:
     """
-    Convert flat string dict to Notion property objects for page update.
-    Support updating Name (title), Status (status), others as rich_text.
+    Same mapping as create, but for updates.
     """
     mapped = {}
     for key, value in (flat_props or {}).items():
@@ -46,6 +89,18 @@ def map_properties_for_update(flat_props: dict) -> dict:
             mapped[key] = {"title": [{"text": {"content": str(value)}}]}
         elif key == "Status":
             mapped[key] = {"status": {"name": str(value)}}
+        elif key == "Section":
+            mapped[key] = {"select": {"name": str(value)}}
+        elif key == "Tags":
+            mapped[key] = {"multi_select": _to_multi_select_list(value)}
+        elif key == "Order":
+            num = _to_number(value)
+            if num is not None:
+                mapped[key] = {"number": num}
+        elif key == "Source":
+            mapped[key] = {"select": {"name": str(value)}}
+        elif key == "Content":
+            mapped[key] = {"rich_text": [{"text": {"content": str(value)}}]}
         else:
             mapped[key] = {"rich_text": [{"text": {"content": str(value)}}]}
     return mapped
@@ -86,7 +141,12 @@ def create_page():
     print("📤 /create-page -> Notion payload:")
     print(notion_props)
 
-    response = requests.post(f"{NOTION_API_BASE}/pages", headers=NOTION_HEADERS, json=notion_props, timeout=30)
+    response = requests.post(
+        f"{NOTION_API_BASE}/pages",
+        headers=NOTION_HEADERS,
+        json=notion_props,
+        timeout=30
+    )
 
     print("📥 /create-page <- Notion response:", response.status_code)
     print(response.text[:2000])  # trim huge logs
@@ -105,13 +165,17 @@ def update_page():
         return jsonify({"error": "Missing 'properties' in request body"}), 400
 
     updated_props = map_properties_for_update(properties)
-
     payload = {"properties": updated_props}
 
     print("📤 /update-page -> Notion payload:")
     print({"pageId": page_id, **payload})
 
-    response = requests.patch(f"{NOTION_API_BASE}/pages/{page_id}", headers=NOTION_HEADERS, json=payload, timeout=30)
+    response = requests.patch(
+        f"{NOTION_API_BASE}/pages/{page_id}",
+        headers=NOTION_HEADERS,
+        json=payload,
+        timeout=30
+    )
 
     print("📥 /update-page <- Notion response:", response.status_code)
     print(response.text[:2000])
@@ -159,7 +223,11 @@ def read_page():
 
     print("📤 /read-page -> Notion GET:", page_id)
 
-    response = requests.get(f"{NOTION_API_BASE}/pages/{page_id}", headers=NOTION_HEADERS, timeout=30)
+    response = requests.get(
+        f"{NOTION_API_BASE}/pages/{page_id}",
+        headers=NOTION_HEADERS,
+        timeout=30
+    )
 
     print("📥 /read-page <- Notion response:", response.status_code)
     return safe_json_response(response)
