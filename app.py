@@ -17,8 +17,16 @@ NOTION_API_BASE = "https://api.notion.com/v1"
 @app.route('/create-page', methods=['POST'])
 def create_page():
     data = request.json
-    database_id = data['databaseId']
-    properties = data['properties']
+
+    # Safe field handling
+    database_id = data.get('databaseId')
+    properties = data.get('properties')
+
+    if not database_id:
+        return jsonify({"error": "Missing 'databaseId' in request body"}), 400
+    if not properties:
+        return jsonify({"error": "Missing 'properties' in request body"}), 400
+
     notion_props = {
         "parent": { "database_id": database_id },
         "properties": {}
@@ -38,8 +46,17 @@ def create_page():
                 "rich_text": [{ "text": { "content": value } }]
             }
 
+    # Debug logs
+    print("📤 Sending to Notion:")
+    print(notion_props)
+
     response = requests.post(f"{NOTION_API_BASE}/pages", headers=NOTION_HEADERS, json=notion_props)
-    return jsonify(response.json())
+
+    print("📥 Notion responded with:")
+    print(response.status_code)
+    print(response.text)
+
+    return jsonify(response.json()), response.status_code
 
 @app.route('/update-page', methods=['POST'])
 def update_page():
