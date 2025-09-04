@@ -4,23 +4,73 @@ import requests
 import os
 
 app = Flask(__name__)
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")  # Get token from environment variable
+
+# --- Notion config ---
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")  # Set in your Render env
 NOTION_VERSION = '2022-06-28'
+NOTION_API_BASE = "https://api.notion.com/v1"
+
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
     "Content-Type": "application/json",
     "Notion-Version": NOTION_VERSION
 }
 
-NOTION_API_BASE = "https://api.notion.com/v1"
+# ---------- Helpers ----------
+
+def map_properties_for_create(flat_props: dict) -> dict:
+    """
+    Convert flat string dict to Notion property objects for page creation.
+    - Name   -> title
+    - Status -> status
+    - everything else -> rich_text
+    """
+    mapped = {}
+    for key, value in (flat_props or {}).items():
+        if key == "Name":
+            mapped[key] = {"title": [{"text": {"content": str(value)}}]}
+        elif key == "Status":
+            mapped[key] = {"status": {"name": str(value)}}
+        else:
+            mapped[key] = {"rich_text": [{"text": {"content": str(value)}}]}
+    return mapped
+
+def map_properties_for_update(flat_props: dict) -> dict:
+    """
+    Convert flat string dict to Notion property objects for page update.
+    Support updating Name (title), Status (status), others as rich_text.
+    """
+    mapped = {}
+    for key, value in (flat_props or {}).items():
+        if key == "Name":
+            mapped[key] = {"title": [{"text": {"content": str(value)}}]}
+        elif key == "Status":
+            mapped[key] = {"status": {"name": str(value)}}
+        else:
+            mapped[key] = {"rich_text": [{"text": {"content": str(value)}}]}
+    return mapped
+
+def safe_json_response(resp):
+    """Return Notion's JSON (if any) with the same status code."""
+    try:
+        return jsonify(resp.json()), resp.status_code
+    except Exception:
+        return jsonify({"status": resp.status_code, "text": resp.text}), resp.status_code
+
+# ---------- Routes ----------
 
 @app.route('/create-page', methods=['POST'])
 def create_page():
-    data = request.json
+    data = request.get_json(silent=True) or {}
 
-    # Safe field handling
+    # Safe field handling (optional defaults so action tests don't 500 on empty bodies)
     database_id = data.get('databaseId')
     properties = data.get('properties')
+
+    # If a databaseId was provided but properties is missing/empty,
+    # fall back to safe defaults instead of 400.
+    if database_id and not properties:
+        properties = {"Name": "Untitled from Action Test", "Status": "Not started"}
 
     if not database_id:
         return jsonify({"error": "Missing 'databaseId' in request body"}), 400
@@ -28,76 +78,96 @@ def create_page():
         return jsonify({"error": "Missing 'properties' in request body"}), 400
 
     notion_props = {
-        "parent": { "database_id": database_id },
-        "properties": {}
+        "parent": {"database_id": database_id},
+        "properties": map_properties_for_create(properties)
     }
 
-    for key, value in properties.items():
-        if key == "Name":
-            notion_props["properties"][key] = {
-                "title": [{ "text": { "content": value } }]
-            }
-        elif key == "Status":
-            notion_props["properties"][key] = {
-                "status": { "name": value }
-            }
-        else:
-            notion_props["properties"][key] = {
-                "rich_text": [{ "text": { "content": value } }]
-            }
-
     # Debug logs
-    print("📤 Sending to Notion:")
+    print("📤 /create-page -> Notion payload:")
     print(notion_props)
 
-    response = requests.post(f"{NOTION_API_BASE}/pages", headers=NOTION_HEADERS, json=notion_props)
+    response = requests.post(f"{NOTION_API_BASE}/pages", headers=NOTION_HEADERS, json=notion_props, timeout=30)
 
-    print("📥 Notion responded with:")
-    print(response.status_code)
-    print(response.text)
+    print("📥 /create-page <- Notion response:", response.status_code)
+    print(response.text[:2000])  # trim huge logs
 
-    return jsonify(response.json()), response.status_code
+    return safe_json_response(response)
 
 @app.route('/update-page', methods=['POST'])
 def update_page():
-    data = request.json
-    page_id = data['pageId']
-    properties = data['properties']
+    data = request.get_json(silent=True) or {}
+    page_id = data.get('pageId')
+    properties = data.get('properties')
 
-    updated_props = {}
-    for key, value in properties.items():
-        if key == "Status":
-            updated_props[key] = {
-                "status": { "name": value }
-            }
-        else:
-            updated_props[key] = {
-                "rich_text": [{ "text": { "content": value } }]
-            }
+    if not page_id:
+        return jsonify({"error": "Missing 'pageId' in request body"}), 400
+    if not properties:
+        return jsonify({"error": "Missing 'properties' in request body"}), 400
 
-    response = requests.patch(f"{NOTION_API_BASE}/pages/{page_id}", headers=NOTION_HEADERS, json={"properties": updated_props})
-    return jsonify(response.json())
+    updated_props = map_properties_for_update(properties)
+
+    payload = {"properties": updated_props}
+
+    print("📤 /update-page -> Notion payload:")
+    print({"pageId": page_id, **payload})
+
+    response = requests.patch(f"{NOTION_API_BASE}/pages/{page_id}", headers=NOTION_HEADERS, json=payload, timeout=30)
+
+    print("📥 /update-page <- Notion response:", response.status_code)
+    print(response.text[:2000])
+
+    return safe_json_response(response)
 
 @app.route('/query-database', methods=['POST'])
 def query_database():
-    data = request.json
-    database_id = data['databaseId']
-    filter_ = data.get('filter', {})
+    data = request.get_json(silent=True) or {}
+    database_id = data.get('databaseId')
+    if not database_id:
+        return jsonify({"error": "Missing 'databaseId' in request body"}), 400
 
-    response = requests.post(f"{NOTION_API_BASE}/databases/{database_id}/query", headers=NOTION_HEADERS, json={"filter": filter_})
-    return jsonify(response.json())
+    # Optional Notion query args
+    payload = {}
+    if "filter" in data and data["filter"] is not None:
+        payload["filter"] = data["filter"]
+    if "sorts" in data and data["sorts"] is not None:
+        payload["sorts"] = data["sorts"]
+    if "start_cursor" in data and data["start_cursor"]:
+        payload["start_cursor"] = data["start_cursor"]
+    if "page_size" in data and data["page_size"]:
+        payload["page_size"] = data["page_size"]
+
+    print("📤 /query-database -> Notion payload:")
+    print({"database_id": database_id, **payload})
+
+    response = requests.post(
+        f"{NOTION_API_BASE}/databases/{database_id}/query",
+        headers=NOTION_HEADERS,
+        json=payload if payload else {},
+        timeout=30
+    )
+
+    print("📥 /query-database <- Notion response:", response.status_code)
+    # Avoid dumping entire result set in logs
+    return safe_json_response(response)
 
 @app.route('/read-page', methods=['POST'])
 def read_page():
-    data = request.json
-    page_id = data['pageId']
+    data = request.get_json(silent=True) or {}
+    page_id = data.get('pageId')
+    if not page_id:
+        return jsonify({"error": "Missing 'pageId' in request body"}), 400
 
-    response = requests.get(f"{NOTION_API_BASE}/pages/{page_id}", headers=NOTION_HEADERS)
-    return jsonify(response.json())
+    print("📤 /read-page -> Notion GET:", page_id)
+
+    response = requests.get(f"{NOTION_API_BASE}/pages/{page_id}", headers=NOTION_HEADERS, timeout=30)
+
+    print("📥 /read-page <- Notion response:", response.status_code)
+    return safe_json_response(response)
 
 @app.route('/', methods=['GET'])
 def home():
     return "Notion GPT Backend is running!"
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host='0.0.0.0', port=port)
